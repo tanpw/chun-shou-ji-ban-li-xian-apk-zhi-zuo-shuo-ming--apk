@@ -1,0 +1,226 @@
+纯手机版（离线）APK 制作说明
+================================
+
+说明：本文档面向"不依赖电脑后端、纯手机离线运行"的安卓 APK 制作，
+步骤使用阿拉伯数字连续编号（1、2、3……）。
+核心思路：把原本需要服务器 / 网络的功能，改为手机本地存储
+（如 AsyncStorage / SQLite），再用标准安卓打包流程生成 APK。
+最终装到手机上、开飞行模式也能用，全程不依赖电脑。
+
+------------------------------------------------------------
+本机已就绪的本地依赖（直接复用，无需联网下载）
+------------------------------------------------------------
+本机（/mnt/e 盘）已准备好一套完整离线构建依赖，打包时直接使用，
+不必再从 Google / gradle 官网下载。各路径如下：
+
+- Android SDK 根目录：/mnt/e/apk-build/android-sdk
+    - platforms：android-34、android-35、android-36
+    - build-tools：34.0.0
+    - platform-tools：含 adb（需加入 PATH）
+    - ndk：26.1.10909125  ← 与 React Native 0.74 / Expo SDK 51 匹配，
+
+    - cmake：3.22.1
+    - licenses：已就绪（sdkmanager 许可已接受）
+- JDK 17：/usr/lib/jvm/java-17-openjdk-amd64
+- Node.js：18 或 20（LTS），`node -v` 验证
+- Gradle：用项目自带 wrapper（android/gradlew），distributionUrl 指向本地
+          缓存，断网也能构建；本机已缓存 8.8。
+
+打包前只需设好环境变量（见下方"三、打包 APK"步骤 85-88）：
+    export ANDROID_HOME=/mnt/e/apk-build/android-sdk
+    export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+    export PATH=$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$PATH
+并在 android/local.properties 写一行：sdk.dir=/mnt/e/apk-build/android-sdk
+
+注意：React Native 构建会强制用 NDK 编译原生库，务必保证
+/mnt/e/apk-build/android-sdk/ndk 下只有完好的 26.1.10909125，
+否则 SDK 管理器扫描到 package.xml 损坏的目录会直接报错崩溃。
+
+适用技术栈：React Native + Expo（或纯 RN）。下面以它为例，
+其它框架（Flutter / 原生）思路相同，只是命令不同。
+
+------------------------------------------------------------
+一、找依赖（环境、版本、工具）
+------------------------------------------------------------
+
+1. 确认目标：先想清楚这个 APK 要解决什么问题、需要哪些本地功能（记事、计时、统计等）。
+2. 选定技术栈：推荐 React Native + Expo，跨平台、社区成熟、易打包。
+3. 记录最低安卓版本：一般 minSdk 21（安卓 5.0），targetSdk 34。
+4. 准备一台电脑用于"打包"（仅打包时需要，最终 APK 不依赖电脑运行）。
+5. 安装 Node.js：版本选 18 或 20（LTS），用 `node -v` 验证。
+6. 安装 JDK：必须 17（新版 RN/Expo 强制 JDK 17），`java -version` 核对。
+7. 安装 Android SDK：至少包含 platforms;android-34 与 build-tools;34.0.0。
+8. 设置环境变量 ANDROID_HOME 指向 SDK 目录。
+9. 把 platform-tools 加入 PATH（内含 adb 命令）。
+10. 安装 Gradle：推荐 8.x；可让项目自带 wrapper，断网也能构建（wrapper 指向本地 zip）。
+11. 确认 Gradle wrapper 的 distributionUrl：离线用 file:/// 本地路径，联网用 https://services.gradle.org/...
+12. 安装 npm 或 yarn 包管理器。
+13. 用 `npm -v` 确认 npm 可用。
+14. 安装 Expo CLI：`npm install -g expo-cli`（若用 Expo）。
+15. 或用 RN CLI：`npx @react-native-community/cli`。
+16. 安装 Git（用于版本管理与上传）。
+17. 检查 Python：部分原生构建脚本需要，装 3.x。
+18. 确认手机：安卓 7.0+，开启"开发者选项 → USB 调试"。
+19. 准备数据本地化库：@react-native-async-storage/async-storage（键值存储）。
+20. 备选本地数据库：react-native-sqlite-storage / WatermelonDB（结构化数据）。
+21. 若需图表统计：安装 react-native-svg + victory-native 或 d3。
+22. 若需本地图片 / 资源：直接放 assets，不打网络请求。
+23. 列出所有原本调用后端 API 的地方（网络请求清单）。
+24. 把这些 API 映射为本地存储操作（读 / 写 / 删 / 查）。
+25. 确定离线后哪些功能必须保留、哪些可简化。
+26. 画出数据模型：实体、字段、关系。
+27. 决定存储格式：简单键值用 AsyncStorage，复杂关系用 SQLite。
+28. 准备图标与启动图（自适应图标 1024x1024、png）。
+29. 准备应用名称、包名（如 com.example.app）、版本号。
+30. 检查磁盘空间：SDK + node_modules 约占 2-5GB。
+31. 若断网环境：提前把 node_modules 与 gradle 缓存下载好。
+32. 验证网络清单：用 `grep -rn "fetch(" src/` 找出所有请求。
+33. 验证 import 清单：确认所有依赖都已写入 package.json。
+34. 锁定版本：生成 package-lock.json / yarn.lock 保证可复现。
+35. 选打包方式：debug（自测）或 release（发布，需签名）。
+36. 准备 release 签名密钥（keytool 生成 .jks），保存好密码。
+37. 把签名信息写入 gradle.properties（不要提交到公开仓库）。
+38. 安装模拟器或准备真机用于自测。
+39. 备份一份干净的依赖清单（README 记录版本）。
+40. 依赖阶段自检：node、jdk17、sdk、gradle、adb 全部能打印版本即达标。
+
+------------------------------------------------------------
+二、写代码（让应用离线可用）
+------------------------------------------------------------
+
+41. 初始化项目：`npx create-expo-app@latest MyApp` 或 `npx react-native init MyApp`。
+42. 进入项目目录：`cd MyApp`。
+43. 安装本地存储依赖：`npm install @react-native-async-storage/async-storage`。
+44. 若 RN 原生项目，额外 `npx pod-install`（iOS；安卓略）。
+45. 新建目录结构：src/screens、src/components、src/services、src/store、src/utils。
+46. 删除或注释掉所有 import 网络库（axios / fetch 后端）。
+47. 新建 src/services/storage.js 封装本地存储。
+48. 在 storage.js 实现 get(key)、set(key,value)、remove(key)、keys()。
+49. 用 JSON.stringify 序列化对象再存储，读取时 JSON.parse。
+50. 新建 src/services/api.js 作为"假后端"：函数签名保持与原来一致。
+51. api.js 内部调用 storage.js 而非 fetch。
+52. 例如 login() 改为从本地读取账户，首次自动创建本地账户。
+53. listChores() 改为读取本地任务列表。
+54. saveChore() 改为写入本地列表。
+55. 统计接口改为本地计算（数组 reduce / 过滤）。
+56. 建议接口统一返回 {ok:true, data:...} 结构，兼容旧 UI。
+57. 在 App.js 注入存储初始化（启动时 ensure 默认数据）。
+58. 设计首页：列出核心功能入口。
+59. 编写列表页：从 api.js 取数，渲染本地数据。
+60. 编写详情 / 编辑页：保存时调用 api.saveXxx。
+61. 编写"新增"页：表单提交写本地。
+62. 加计时功能（如需）：用 setInterval 记录本地开始 / 结束时间。
+63. 加评分 / 打分：本地存分数，统计页汇总。
+64. 加统计页：按月 / 周聚合本地数据，画简单图表。
+65. 加搜索 / 筛选：对本地数组 filter。
+66. 加导出：把本地数据导出为 JSON 文件存到手机下载目录。
+67. 处理空状态：无数据时的引导提示。
+68. 处理错误：本地读写失败给出提示，不崩。
+69. 统一主题与配色，适配手机屏幕（flex 布局）。
+70. 做自适应图标与启动屏（expo-splash-screen / android 原生）。
+71. 做多分辨率适配：使用 dp 单位、可缩放图片。
+72. 关闭所有远程日志 / 统计 SDK（避免离线报错）。
+73. 关闭自动更新 / 热更新（如 CodePush）以免依赖网络。
+74. 在代码中搜索并删除任何 http / https 后端地址。
+75. 用 `grep -rn "http" src/` 复查无残留后端调用。
+76. 写一份本地默认数据种子（如示例任务），首次启动注入。
+77. 单元测试（可选）：对 api.js 逻辑写几个用例。
+78. 在模拟器或真机跑 `npx expo start` / `npx react-native run-android` 自测。
+79. 拔掉网络 / 开飞行模式，验证所有功能仍可用。
+80. 代码阶段自检：飞行模式下应用能注册、增删改查、统计，不报错即通过。
+
+------------------------------------------------------------
+三、打包 APK（生成可安装的离线安装包）
+------------------------------------------------------------
+
+81. 确保已 `cd` 到项目根目录。
+82. 若是 Expo 托管工作流，先预构建原生工程：`npx expo prebuild`（生成 android/）。
+83. 或 RN CLI 已自带 android/ 目录，跳过此步。
+84. 进入原生目录：`cd android`。
+85. 设置环境变量（本机实测路径，直接复制）：
+86.   export ANDROID_HOME=/mnt/e/apk-build/android-sdk
+87.   export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+88.   export PATH=$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$PATH
+89. 检查 local.properties 含 sdk.dir=...（无则手动加一行）。
+90. 打开 android/app/build.gradle，确认 applicationId（包名）。
+91. 确认 minSdkVersion、targetSdkVersion、compileSdkVersion。
+92. 配置签名：在 build.gradle 的 signingConfigs 引用 gradle.properties 的密钥。
+93. 若仅自测，可用默认 debug 签名（无需自己生成）。
+94. 执行清理：`./gradlew clean`（Windows 用 gradlew.bat）。
+95. 执行打包：`../gradlew assembleRelease --no-daemon`（在 android 目录内则为 `./gradlew assembleRelease --no-daemon`）。
+96. 若用 expo 直接出包：`npx expo export` 再 eas build（需联网）；离线推荐 gradlew。
+97. 等待构建，首次会下载依赖（联网场景）；离线用本地 wrapper 缓存。
+98. 构建成功产物在：android/app/build/outputs/apk/release/app-release.apk。
+99. 若失败，先看报错最后 30 行，定位是依赖 / 签名 / 代码问题。
+100. 常见错1：JDK 版本不对 → 换成 17 重来。
+101. 常见错2：sdk.dir 缺失 → 补 local.properties。
+102. 常见错3：Gradle 下载失败 → 改用本地 file:/// wrapper 或离线缓存。
+103. 常见错4：包名冲突 → 改 applicationId。
+104. 常见错5：内存不足 → 设 org.gradle.jvmargs=-Xmx2048m。
+105. 构建通过后，用 adb 安装：`adb install -r app-release.apk`。
+106. 或把 apk 拷到手机，文件管理器点击安装（允许未知来源）。
+107. 打开应用，飞行模式下完整走一遍核心流程。
+108. 确认无网络请求：可用"网络监控"类 App 或抓包验证。
+109. 确认数据持久：卸载重装后旧数据是否该保留 / 清空（按设计）。
+110. 若需分发，把 apk 上传到任意文件服务或当面传。
+111. 写 README：记录依赖版本、打包命令、使用说明。
+112. 把源码（排除 node_modules、build）提交到 Git。
+113. 加 .gitignore：node_modules/、build/、*.apk、*.jks、local.properties。
+114. 不要把签名密钥提交到公开仓库。
+115. 如需体积小，开启混淆与资源压缩（minifyEnabled true）。
+116. 如需再打包，改版本号 versionCode / versionName 后重复 94-105。
+117. 多机型自测：不同分辨率 / 安卓版本各装一次。
+118. 收集反馈，迭代功能。
+119. 备份 keystore 与项目源码到安全位置。
+120. 完成：得到纯手机离线 APK，安装即用，全程不依赖电脑后端。
+
+================================
+本机记事本 APK 实操步骤（照抄即可，实测通过）
+------------------------------------------------------------
+项目：/mnt/e/apk/jishiben/Notebook34（Expo SDK 51 / RN 0.74，纯手机离线）
+本地依赖已就绪（见上文"本机已就绪的本地依赖"），全程断网可构建。
+只需 5 步：
+
+1) 准备环境变量（每次新开终端都执行一次）：
+   export ANDROID_HOME=/mnt/e/apk-build/android-sdk
+   export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+   export PATH=$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$PATH
+
+2) 指好 SDK（仅首次，写进 android/local.properties）：
+   echo "sdk.dir=/mnt/e/apk-build/android-sdk" > android/local.properties
+
+3) 进入原生目录并清理旧缓存（可选，换机/换 SDK 后做）：
+   cd /mnt/e/apk/jishiben/Notebook34/android
+   rm -rf .gradle
+   ./gradlew clean --no-daemon
+
+4) 打包正式 APK（首次约 5-10 分钟，之后快很多）：
+   cd /mnt/e/apk/jishiben/Notebook34/android
+   ./gradlew assembleRelease --no-daemon
+   成功产物：app/build/outputs/apk/release/app-release.apk
+
+5) 装到手机 / 验证：
+   adb install -r app-release.apk        # 手机开 USB 调试并连电脑
+   # 或把 app-release.apk 拷到手机，文件管理器点开安装（允许未知来源）
+   # 校验：开飞行模式，记事/增删改查/文件导入导出全部可用即通过
+
+常见坑：
+- 报错 "Could not determine NDK" → 确认 ndk 目录只剩 26.1.10909125，
+  损坏的 26.3 / 27.0 已删除，不能再放回。
+- 报错 JDK 版本 → 必须 17，检查 $JAVA_HOME 指向 java-17-openjdk-amd64。
+- 卡在下载 NDK/SDK → 说明没用到本地 SDK，检查 ANDROID_HOME 与
+  local.properties 的 sdk.dir 是否都指向 /mnt/e/apk-build/android-sdk。
+- 改版本号再打包：编辑 android/app/build.gradle 的 versionCode / versionName，
+  重复第 4 步。
+
+================================
+附：最小命令速查（以 Expo + RN 为例）
+------------------------------------------------------------
+- 依赖：Node 18/20、JDK 17(/usr/lib/jvm/java-17-openjdk-amd64)、
+        Android SDK(/mnt/e/apk-build/android-sdk，含 ndk 26.1.10909125、
+        build-tools 34.0.0、cmake 3.22.1)、Gradle 8.8 wrapper、AsyncStorage
+- 代码：把 api.js 改为读 AsyncStorage，删掉所有 http 调用
+- 打包：cd android && ./gradlew assembleRelease → 产出 app-release.apk
+- 安装：adb install -r app-release.apk
+- 校验：开飞行模式，应用注册 / 增删改查 / 统计全部可用即通过
+================================
